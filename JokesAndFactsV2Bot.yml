@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Create all resource for V2 Lex bot backed by a lambda function
+
+Resources:
+
+# This runtime roles is the bot run time role attached to the Lex V2 bot
+LexBotRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lexv2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: LexRuntimeRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "polly:SynthesizeSpeech"
+                  - "comprehend:DetectSentiment"
+                Resource: "*"
+
+JokesandFactsV2Bot:
+  Type: AWS::Lex::Bot
+  Properties:
+    RoleArn: !GetAtt LexBotRuntimeRole.Arn
+    DataPrivacy:
+      ChildDirected: false
+    IdleSessionTTLInSeconds: 300
+    Description: "Jokes and fact telling bot"
+    AutoBuildBotLocales: true
+    # This alias is the one that will be used to test the bot
+    TestBotAliasSettings:
+      BotAliasLocaleSettings:
+        - LocaleId: en_US
+          BotAliasLocaleSetting:
+            Enabled: true
+            CodeHookSpecification:
+              LambdaCodeHook:
+                CodeHookInterfaceVersion: "1.0"
+                # This is the ARN of the lambda code hook that will be running behind the bot
+                LambdaArn: !GetAtt LexCodeHookLambda.Arn 
+
+    BotLocales:
+      - LocaleId: "en_US" 
+        NluConfidenceThreshold: 0.40
+        VoiceSettings:
+          VoiceId: "Ivy"
+        SlotTypes:
+          #Requirement
+          - Name: "joketype"
+            Description: "joketype"
+            SlotTypeValues:
+              - SampleValue: 
+                dad
+                Synonyms: 
+                  - dad joke
+                  - a dad joke
+              - SampleValue:
+                  Value: chuck norris
+                Synonyms: 
+                  - chuck norris joke
+                  - a chuck norris joke
+            ValueSelectionSetting:
+              ResolutionStrategy: ORIGINAL_VALUE
+
+        Intents:
+          - Name: "JokesIntent"
+            Description: "JokesIntent"
+            SampleUtterances:
+              - Utterance: "Tell me a joke"
+              - Utterance: "Can you tell me a joke"
+              - Utterance: "Can you tell me a joke a please"
+              - Utterance: "I would like to hear a joke"
+            DialogCodeHook:
+              Enabled: true
+            Slots:
+              - Name: "joketype"
+                Description: "joketype"
+                SlotTypeName: "joketype"
+                ValueElicitationSetting:
+                  SlotConstraint: "Optional"
+                  PromptSpecification:
+                    MessageGroupsList:
+                      - Message:
+                          PlainTextMessage:
+                            Value: "What type of joke would you like to hear"
+                    MaxRetries: 3
+                    AllowInterrupt: false
+          - Name: "FactsIntent"
+            Description: "FactsIntent"
+            SampleUtterances:
+              - Utterance: "Tell me a fact"
+              - Utterance: "Can you tell me a fact"
+              - Utterance: "Can you tell me a random fact please"
+              - Utterance: "I would like to hear a fact"
+            DialogCodeHook:
+              Enabled: true
+
+
+# 3. Define a bot version that depends on the DRAFT version of the Lex Bot.
+JokesandFactV2BotVersionWithCFN:
+  DependsOn: JokesandFactsV2Bot
+  Type: AWS::Lex::BotVersion
+  Properties:
+    BotId: !Ref JokesandFactsV2Bot
+    BotVersionLocaleSpecification:
+      - LocaleId: en_US
+        BotVersionLocaleDetails:
+          SourceBotVersion: DRAFT
+    Description: JokesandFactsV2Bot Version
+
+  # 4. Define the alias by providing the bot version created by the
+  #    AWS::Lex::BotVersion resource above.
+FirstBotAliasWithCFN:
+  DependsOn: JokesandFactV2BotVersionWithCFN
+  Type: AWS::Lex::BotAlias
+  Properties:
+    BotId: !Ref JokesandFactsV2Bot
+    BotAliasName: "JokesandFactV2BotVersionAlias"
+    BotVersion: !GetAtt JokesandFactV2BotVersionWithCFN.BotVersion
+    SentimentAnalysisSettings:
+      DetectSentiment: true
+    BotAliasLocaleSettings:
+      - LocaleId: en_US
+        BotAliasLocaleSetting:
+          Enabled: true
+          CodeHookSpecification:
+            LambdaCodeHook:
+              CodeHookInterfaceVersion: "1.0"
+              LambdaArn: !GetAtt LexCodeHookLambda.Arn
+
+LexCodeHookLambda:
+  Type: AWS::Lambda::Function
+  Properties:
+    Handler: index.handler
+    Role:
+      Fn::ImportValue: !Sub "LexCodeHookLambdaExecutionRoleARN-${Environment}"
+    Runtime: nodejs14.x
+    Timeout: 30
+    Environment:
+      Variables:
+        Environemnt: !Ref Environment
+    PackageType: Zip
+    Code: ../src/lex-code-hook-lambda/
+
+LexCodeHookLambdaExecutionRole:
+  Type: AWS::IAM::Role
+  Properties:
+    AssumeRolePolicyDocument:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action: sts:AssumeRole
+    ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+    Path: /
+
+
+LexPermissionForCodehookLambda:
+  Type: AWS::Lambda::Permission
+  Properties:
+    FunctionName: !Ref LexCodeHookLambda
+    Action: lambda:InvokeFunction
+    Principal: lexv2.amazonaws.com
+    SourceAccount: !Ref "AWS::AccountId"
+    SourceArn: !GetAtt FirstBotAliasWithCFN.Arn
+
+LexPermissionForCodehookLambdaTestAlias:
+  Type: AWS::Lambda::Permission
+  Properties:
+    FunctionName: !Ref LexCodeHookLambda
+    Action: lambda:InvokeFunction
+    Principal: lexv2.amazonaws.com
+    SourceAccount: !Ref "AWS::AccountId"
+    SourceArn: !Sub "arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/${JokesandFactsV2Bot.Id}/TSTALIASID"
